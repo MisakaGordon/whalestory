@@ -1,0 +1,3 @@
+- insert:
+    - id: whalestory-companion
+      name: '@gordon2moon/dsh-whalestory'
