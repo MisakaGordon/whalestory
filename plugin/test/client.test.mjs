@@ -29,6 +29,12 @@ function loadClient() {
       removeEventListener() {},
     },
     document: { visibilityState: 'visible' },
+    localStorage: {
+      store: new Map(),
+      getItem(key) { return this.store.get(key) ?? null; },
+      setItem(key, value) { this.store.set(key, String(value)); },
+      removeItem(key) { this.store.delete(key); },
+    },
     Image: function Image() {},
     AbortController,
     performance: { now: () => 0 },
@@ -246,6 +252,44 @@ test('LLM eligibility respects beat, cooldown, visibility, and backoff', () => {
   assert.equal(T.shouldUseLlm({ ...args, backoffUntil: 120_000 }), false);
 });
 
+test('LLM policy normalization and intervals follow the four user choices', () => {
+  assert.equal(T.normalizeLlmPolicy('off'), 'off');
+  assert.equal(T.normalizeLlmPolicy('high'), 'high');
+  assert.equal(T.normalizeLlmPolicy('always'), 'always');
+  assert.equal(T.normalizeLlmPolicy('nonsense'), 'low');
+  assert.equal(T.normalizeLlmPolicy(null), 'low');
+
+  assert.equal(T.policyMinInterval('off'), Number.POSITIVE_INFINITY);
+  assert.equal(T.policyMinInterval('low'), 45_000);
+  assert.equal(T.policyMinInterval('high'), 15_000);
+  assert.equal(T.policyMinInterval('always'), 4_000);
+});
+
+test('LLM policy changes the cooldown and can disable calls entirely', () => {
+  const eligible = T.deriveSignal(base({ running: true, hasPartialText: true }));
+  const args = {
+    signal: eligible,
+    now: 100_000,
+    mountedAt: 0,
+    lastLlmAt: 80_000,
+    inFlight: false,
+    visible: true,
+    unavailable: false,
+    backoffUntil: 0,
+  };
+  assert.equal(T.shouldUseLlm({ ...args, policy: 'off' }), false);
+  assert.equal(T.shouldUseLlm({ ...args, policy: 'low' }), false);
+  assert.equal(T.shouldUseLlm({ ...args, policy: 'high' }), true);
+  assert.equal(T.shouldUseLlm({ ...args, policy: 'always' }), true);
+});
+
+test('the policy store persists the choice and normalizes bad storage values', () => {
+  T.setLlmPolicy('always');
+  assert.equal(T.getLlmPolicy(), 'always');
+  T.setLlmPolicy('bogus');
+  assert.equal(T.getLlmPolicy(), 'low');
+});
+
 test('walking bounces at both boundaries and flips direction', () => {
   let step = T.stepWalker({ x: 0, dir: 1, maxX: 100, distance: 30 });
   assert.equal(step.x, 30);
@@ -264,6 +308,14 @@ test('walking bounces at both boundaries and flips direction', () => {
 test('walking art faces its movement direction', () => {
   assert.equal(T.walkFlip(1), 'scaleX(-1)');
   assert.equal(T.walkFlip(-1), 'scaleX(1)');
+});
+
+test('speech replacement waits for a minimum dwell', () => {
+  assert.equal(T.speechDelayMs(1000, 1500, true, 2800), 2300);
+  assert.equal(T.speechDelayMs(1000, 4000, true, 2800), 0);
+  assert.equal(T.speechDelayMs(0, 1000, true, 2800), 0);
+  assert.equal(T.speechDelayMs(1000, 1500, false, 2800), 0);
+  assert.equal(T.speechDelayMs(1000, 1500, true, 1200), 700);
 });
 
 test('pending peek copy distinguishes approval from a question', () => {
@@ -316,6 +368,91 @@ test('thought classification uses categories, never raw text', () => {
   assert.equal(T.classifyThoughtText('x'.repeat(500)), 'long');
 });
 
+test('work content is summarized locally and only expanded by depth', () => {
+  const node = toolResult({
+    name: 'read',
+    content: [{ type: 'text', text: 'line one\nline two\nline three' }],
+    call: { name: 'read', argsRaw: '{"file_path":"src/App.tsx"}' },
+  });
+  const signal = T.deriveSignal(base({ lastNode: node }));
+  assert.equal(signal.contentKind, 'file');
+  assert.match(signal.contentSummary, /App\.tsx/u);
+  assert.match(signal.contentSummary, /3 行/u);
+  assert.match(signal.contentSnippet, /line one/u);
+
+  const off = T.toObservation(signal, 'off');
+  assert.equal('contentSummary' in off, false);
+  assert.equal('contentSnippet' in off, false);
+
+  const summary = T.toObservation(signal, 'summary');
+  assert.match(summary.contentSummary, /App\.tsx/u);
+  assert.equal('contentSnippet' in summary, false);
+
+  const snippet = T.toObservation(signal, 'snippet');
+  assert.match(snippet.contentSnippet, /line one/u);
+});
+
+test('command and edit content use reliable local structures', () => {
+  const command = T.deriveSignal(base({
+    lastNode: toolResult({
+      name: 'bash',
+      content: [{ type: 'text', text: 'boom\n[exit code: 2]' }],
+      call: { name: 'bash', argsRaw: '{"command":"pnpm test"}' },
+    }),
+  }));
+  assert.equal(command.contentKind, 'command');
+  assert.match(command.contentSummary, /失败/u);
+  assert.match(command.contentSummary, /退出码 2/u);
+  assert.match(command.contentSnippet, /exit code: 2/u);
+
+  const edit = T.deriveSignal(base({
+    lastNode: toolResult({
+      name: 'edit',
+      content: [{ type: 'text', text: 'updated' }],
+      call: { name: 'edit', argsRaw: '{"file_path":"src/App.tsx","new_string":"a\\nb\\nc"}' },
+    }),
+  }));
+  assert.equal(edit.contentKind, 'edit');
+  assert.match(edit.contentSummary, /App\.tsx/u);
+  assert.match(edit.contentSummary, /3 行/u);
+  assert.match(edit.contentSnippet, /a\nb\nc/u);
+});
+
+test('depth off skips extraction and unrelated running tools do not reuse stale content', () => {
+  const node = toolResult({
+    name: 'read',
+    content: [{ type: 'text', text: 'a\nb' }],
+    call: { name: 'read', argsRaw: '{"file_path":"src/App.tsx"}' },
+  });
+  const off = T.deriveSignal(base({ lastNode: node, contentDepth: 'off' }));
+  assert.equal(off.contentSummary, '');
+  assert.equal(off.contentSnippet, '');
+
+  const asking = T.deriveSignal(base({
+    lastNode: node,
+    running: true,
+    runningCall: { callId: 'q', name: 'ask_user_question', phase: 'start', argsRaw: '{}' },
+    contentDepth: 'summary',
+  }));
+  assert.equal(asking.contentSummary, '');
+});
+
+test('content snippets are redacted and capped', () => {
+  const clean = T.sanitizeSnippet('token sk-abcdefghijklmnop /home/alice/project');
+  assert.match(clean, /\[redacted-key\]/u);
+  assert.equal(clean.includes('/home/alice'), false);
+  assert.ok(Array.from(T.sanitizeSnippet('x'.repeat(2000))).length <= 600);
+});
+
+test('content depth store persists and normalizes bad values', () => {
+  assert.equal(T.normalizeContentDepth('summary'), 'summary');
+  assert.equal(T.normalizeContentDepth('nope'), 'summary');
+  T.setContentDepth('snippet');
+  assert.equal(T.getContentDepth(), 'snippet');
+  T.setContentDepth('bogus');
+  assert.equal(T.getContentDepth(), 'summary');
+});
+
 test('observation object sends only the allow-listed compact fields', () => {
   const signal = T.deriveSignal(base({
     running: true,
@@ -338,6 +475,14 @@ test('observation object sends only the allow-listed compact fields', () => {
   assert.equal('beatKey' in observation, false);
   assert.equal('seed' in observation, false);
   assert.ok(!JSON.stringify(observation).includes('不该发送'));
+});
+
+test('long bubble lines shrink to compact and dense sizes', () => {
+  assert.equal(T.bubbleTextDensity(''), '');
+  assert.equal(T.bubbleTextDensity('一二三四五六七八九十一二三四五六七八九十'), '');
+  assert.equal(T.bubbleTextDensity('一二三四五六七八九十一二三四五六七八九十一'), 'is-compact');
+  assert.equal(T.bubbleTextDensity('一二三四五六七八九十一二三四五六七八九十一二三四五六七八'), 'is-compact');
+  assert.equal(T.bubbleTextDensity('一二三四五六七八九十一二三四五六七八九十一二三四五六七八九'), 'is-dense');
 });
 
 test('clipLine keeps the contract and adds an ellipsis', () => {

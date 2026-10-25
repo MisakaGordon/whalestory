@@ -2,11 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  LLM_POLICIES,
   MAX_LINE_CHARS,
   generateNarration,
+  normalizeContentDepth,
+  normalizeLlmPolicy,
   normalizeObservation,
   observationPrompt,
   pickReasoningEffort,
+  sanitizeContentSnippet,
   sanitizeLine,
   shortField,
 } from '../narrate.js';
@@ -30,6 +34,56 @@ function fakeLlm(chunks, { efforts = [{ id: 'off' }, { id: 'low' }], capture } =
     },
   };
 }
+
+test('LLM policy normalization and safety envelopes', () => {
+  assert.equal(normalizeLlmPolicy('off'), 'off');
+  assert.equal(normalizeLlmPolicy('always'), 'always');
+  assert.equal(normalizeLlmPolicy(undefined), 'low');
+  assert.equal(normalizeLlmPolicy('surprise'), 'low');
+  assert.equal(LLM_POLICIES.low.minIntervalMs, 45_000);
+  assert.equal(LLM_POLICIES.high.minIntervalMs, 15_000);
+  assert.equal(LLM_POLICIES.always.minIntervalMs, 4_000);
+  assert.ok(LLM_POLICIES.always.perWindow > LLM_POLICIES.low.perWindow);
+  assert.ok(LLM_POLICIES.always.globalPerHour > LLM_POLICIES.low.globalPerHour);
+});
+
+test('content depth is opt-in and snippet content is redacted', () => {
+  assert.equal(normalizeContentDepth('off'), 'off');
+  assert.equal(normalizeContentDepth('summary'), 'summary');
+  assert.equal(normalizeContentDepth('snippet'), 'snippet');
+  assert.equal(normalizeContentDepth(undefined), 'off');
+  assert.equal(normalizeContentDepth('surprise'), 'off');
+
+  const clean = sanitizeContentSnippet('key sk-abcdefghijklmnop /home/alice/x\nline2');
+  assert.match(clean, /\[redacted-key\]/u);
+  assert.equal(clean.includes('/home/alice'), false);
+  assert.match(clean, /line2/u);
+  assert.ok(Array.from(sanitizeContentSnippet('x'.repeat(2000))).length <= 600);
+});
+
+test('normalizeObservation applies content depth after redaction', () => {
+  const raw = {
+    mode: 'walk',
+    kind: 'milestone',
+    tool: 'read',
+    target: 'App.tsx',
+    frontend: true,
+    thought: 'none',
+    outcome: 'running',
+    contentKind: 'file',
+    contentSummary: '读取 App.tsx（TSX），3 行',
+    contentSnippet: 'line1\n[key sk-abcdefghijklmnop]',
+  };
+  const off = normalizeObservation(raw, 'off');
+  assert.equal('contentSummary' in off, false);
+  const summary = normalizeObservation(raw, 'summary');
+  assert.equal(summary.contentKind, 'file');
+  assert.match(summary.contentSummary, /App\.tsx/u);
+  assert.equal('contentSnippet' in summary, false);
+  const snippet = normalizeObservation(raw, 'snippet');
+  assert.match(snippet.contentSnippet, /line1/u);
+  assert.equal(snippet.contentSnippet.includes('sk-abcdefghijklmnop'), false);
+});
 
 test('normalizeObservation keeps only the compact allow-list', () => {
   const observation = normalizeObservation({
@@ -63,6 +117,20 @@ test('normalizeObservation rejects invalid enums and non-objects', () => {
   assert.equal(normalizeObservation('hello'), null);
   assert.equal(normalizeObservation({ mode: 'dance', kind: 'milestone' }), null);
   assert.equal(normalizeObservation({ mode: 'walk', kind: 'unknown' }), null);
+  assert.deepEqual(normalizeObservation({ mode: 'normal', kind: 'idle' }), {
+    mode: 'normal',
+    kind: 'idle',
+    frontend: false,
+    thought: 'none',
+    outcome: 'running',
+  });
+  assert.deepEqual(normalizeObservation({ mode: 'walk', kind: 'milestone', contentKind: 'file', contentSummary: 'x' }), {
+    mode: 'walk',
+    kind: 'milestone',
+    frontend: false,
+    thought: 'none',
+    outcome: 'running',
+  });
 });
 
 test('shortField strips controls and quotes and enforces a bound', () => {

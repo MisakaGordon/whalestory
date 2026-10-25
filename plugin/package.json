@@ -1,6 +1,6 @@
 {
   "name": "@gordon2moon/dsh-whalestory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "大肥鱼伴游：在 Harness 输入框上方显示会散步、吐槽、偶尔请旁白模型说一句话的蓝色鲸鱼娘。",
   "main": "index.js",

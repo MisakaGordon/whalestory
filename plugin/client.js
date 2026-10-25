@@ -4,7 +4,7 @@
  * Reads only the framework's existing Chat/Session snapshots from slot props.
  * No prompt, tool, session append, or main-model context is touched. A local
  * line is always shown first; a tiny independent Host LLM call may replace it
- * at most once every 45 seconds, and only for a few narrative beats.
+ * at the user-selected cadence (off/low/high/always).
  */
 window.__ModuleLoader__.load({
   id: '@gordon2moon/dsh-whalestory',
@@ -17,11 +17,19 @@ window.__ModuleLoader__.load({
       narratePath: '/whalestory/narrate',
       llmEnabled: true,
       llmMinIntervalMs: 45000,
+      llmPolicies: {
+        off: { minIntervalMs: 0 },
+        low: { minIntervalMs: 45000 },
+        high: { minIntervalMs: 15000 },
+        always: { minIntervalMs: 4000 },
+      },
       llmTimeoutMs: 6000,
       llmMaxOutputTokens: 96,
       walkSpeedPxPerSecond: 42,
       frameMs: 220,
       speechMs: 6500,
+      minSpeechDwellMs: 2800,
+      llmReplaceDelayMs: 1200,
       idleSpeechMs: 24000,
       minSpeechGapMs: 3500,
       milestoneTools: 6,
@@ -32,8 +40,180 @@ window.__ModuleLoader__.load({
     const narratePath = String(CFG.narratePath ?? '/whalestory/narrate');
     const MAX_LOCAL_CHARS = 36;
 
-    const ZH = { 'aria.stage': '大肥鱼伴游' };
-    const EN = { 'aria.stage': 'Da Feiyu companion' };
+    const POLICY_KEY = 'whalestory:llm-policy';
+    const POLICY_MODES = ['off', 'low', 'high', 'always'];
+    const POLICY_FALLBACK_MS = { off: 0, low: 45000, high: 15000, always: 4000 };
+    const POLICY_LABEL_KEYS = {
+      off: 'settings.llm.off',
+      low: 'settings.llm.low',
+      high: 'settings.llm.high',
+      always: 'settings.llm.always',
+    };
+    const llmPolicyListeners = new Set();
+
+    function normalizeLlmPolicy(value) {
+      return POLICY_MODES.includes(value) ? value : 'low';
+    }
+
+    function readStoredLlmPolicy() {
+      try {
+        return normalizeLlmPolicy(globalThis.localStorage?.getItem(POLICY_KEY));
+      } catch {
+        return 'low';
+      }
+    }
+
+    let currentLlmPolicy = readStoredLlmPolicy();
+
+    function getLlmPolicy() {
+      return currentLlmPolicy;
+    }
+
+    function subscribeLlmPolicy(listener) {
+      llmPolicyListeners.add(listener);
+      return () => {
+        llmPolicyListeners.delete(listener);
+      };
+    }
+
+    function notifyLlmPolicy() {
+      for (const listener of llmPolicyListeners) {
+        try {
+          listener();
+        } catch {
+          // A broken settings row must not stop the companion from updating.
+        }
+      }
+    }
+
+    function setLlmPolicy(value) {
+      const next = normalizeLlmPolicy(value);
+      if (next === currentLlmPolicy) return next;
+      currentLlmPolicy = next;
+      try {
+        globalThis.localStorage?.setItem(POLICY_KEY, next);
+      } catch {
+        // Private browsing can reject storage; the in-memory choice still applies.
+      }
+      notifyLlmPolicy();
+      return next;
+    }
+
+    function refreshLlmPolicy() {
+      const next = readStoredLlmPolicy();
+      if (next === currentLlmPolicy) return;
+      currentLlmPolicy = next;
+      notifyLlmPolicy();
+    }
+
+    function policyMinInterval(policy) {
+      const normalized = normalizeLlmPolicy(policy);
+      if (normalized === 'off') return Number.POSITIVE_INFINITY;
+      const configured = CFG.llmPolicies?.[normalized]?.minIntervalMs;
+      if (Number.isFinite(configured) && configured >= 0) return configured;
+      return POLICY_FALLBACK_MS[normalized] ?? 45000;
+    }
+
+    function useLlmPolicy() {
+      return React.useSyncExternalStore(subscribeLlmPolicy, getLlmPolicy, getLlmPolicy);
+    }
+
+    const DEPTH_KEY = 'whalestory:content-depth';
+    const DEPTH_MODES = ['off', 'summary', 'snippet'];
+    const DEPTH_LABEL_KEYS = {
+      off: 'settings.depth.off',
+      summary: 'settings.depth.summary',
+      snippet: 'settings.depth.snippet',
+    };
+    const contentDepthListeners = new Set();
+
+    function normalizeContentDepth(value) {
+      return DEPTH_MODES.includes(value) ? value : 'summary';
+    }
+
+    function readStoredContentDepth() {
+      try {
+        return normalizeContentDepth(globalThis.localStorage?.getItem(DEPTH_KEY));
+      } catch {
+        return 'summary';
+      }
+    }
+
+    let currentContentDepth = readStoredContentDepth();
+
+    function getContentDepth() {
+      return currentContentDepth;
+    }
+
+    function subscribeContentDepth(listener) {
+      contentDepthListeners.add(listener);
+      return () => {
+        contentDepthListeners.delete(listener);
+      };
+    }
+
+    function notifyContentDepth() {
+      for (const listener of contentDepthListeners) {
+        try {
+          listener();
+        } catch {
+          // A broken settings row must not stop the companion from updating.
+        }
+      }
+    }
+
+    function setContentDepth(value) {
+      const next = normalizeContentDepth(value);
+      if (next === currentContentDepth) return next;
+      currentContentDepth = next;
+      try {
+        globalThis.localStorage?.setItem(DEPTH_KEY, next);
+      } catch {
+        // Private browsing can reject storage; the in-memory choice still applies.
+      }
+      notifyContentDepth();
+      return next;
+    }
+
+    function refreshContentDepth() {
+      const next = readStoredContentDepth();
+      if (next === currentContentDepth) return;
+      currentContentDepth = next;
+      notifyContentDepth();
+    }
+
+    function useContentDepth() {
+      return React.useSyncExternalStore(subscribeContentDepth, getContentDepth, getContentDepth);
+    }
+
+    const ZH = {
+      'aria.stage': '大肥鱼伴游',
+      'settings.llm.title': '旁白 LLM 频率',
+      'settings.llm.description': '控制大肥鱼调用独立旁白模型的频率；设置保存在当前浏览器，关闭后只用本地台词。',
+      'settings.llm.off': '关闭',
+      'settings.llm.low': '低频率（推荐）',
+      'settings.llm.high': '高频率',
+      'settings.llm.always': '总是使用 LLM',
+      'settings.depth.title': '内容感知深度',
+      'settings.depth.description': '摘要只发送本地统计（文件、行数、退出码）；片段会发送有限、脱敏后的已读取内容。',
+      'settings.depth.off': '关闭',
+      'settings.depth.summary': '摘要（推荐）',
+      'settings.depth.snippet': '片段',
+    };
+    const EN = {
+      'aria.stage': 'Da Feiyu companion',
+      'settings.llm.title': 'Companion LLM frequency',
+      'settings.llm.description': 'How often the companion asks the independent narrator model. Saved in this browser; Off uses local lines only.',
+      'settings.llm.off': 'Off',
+      'settings.llm.low': 'Low (recommended)',
+      'settings.llm.high': 'High',
+      'settings.llm.always': 'Always use LLM',
+      'settings.depth.title': 'Content awareness',
+      'settings.depth.description': 'Summary sends local statistics only (file, line count, exit code); Snippet also sends a small, redacted excerpt of content already read.',
+      'settings.depth.off': 'Off',
+      'settings.depth.summary': 'Summary (recommended)',
+      'settings.depth.snippet': 'Snippet',
+    };
 
     const STILL_IMAGES = {
       error: 'attention',
@@ -260,6 +440,18 @@ window.__ModuleLoader__.load({
       return `${chars.slice(0, Math.max(1, max - 1)).join('').replace(/[，、；：,;:\s]+$/u, '')}…`;
     }
 
+    /**
+     * Shrink the bubble font when a line is longer than the comfortable width.
+     * @param {string} text
+     * @returns {'' | 'is-compact' | 'is-dense'}
+     */
+    function bubbleTextDensity(text) {
+      const length = Array.from(String(text ?? '')).length;
+      if (length > 28) return 'is-dense';
+      if (length > 20) return 'is-compact';
+      return '';
+    }
+
     function basename(value) {
       if (typeof value !== 'string') return '';
       const normalized = value.replace(/\\/gu, '/');
@@ -315,6 +507,168 @@ window.__ModuleLoader__.load({
         .map((block) => block && block.type === 'text' && typeof block.text === 'string' ? block.text : '')
         .join(' ')
         .trim();
+    }
+
+    function assistantText(blocks) {
+      if (!Array.isArray(blocks)) return '';
+      return blocks
+        .map((block) => block && block.kind === 'text' && typeof block.text === 'string' ? block.text : '')
+        .join('\n')
+        .trim();
+    }
+
+    function countLines(text) {
+      return String(text ?? '') === '' ? 0 : String(text).split(/\r?\n/u).length;
+    }
+
+    function extractStringArg(raw, key) {
+      const parsed = parseArgs(raw);
+      return typeof parsed[key] === 'string' ? parsed[key] : '';
+    }
+
+    function languageOf(file) {
+      const match = /\.([A-Za-z0-9]+)$/u.exec(String(file ?? ''));
+      const ext = match ? match[1].toLowerCase() : '';
+      const labels = {
+        ts: 'TypeScript', tsx: 'TSX', js: 'JavaScript', jsx: 'JSX', py: 'Python',
+        rs: 'Rust', go: 'Go', java: 'Java', kt: 'Kotlin', c: 'C', h: 'C header',
+        cpp: 'C++', hpp: 'C++ header', cs: 'C#', css: 'CSS', scss: 'SCSS',
+        html: 'HTML', vue: 'Vue', svelte: 'Svelte', json: 'JSON', md: 'Markdown',
+        sh: 'Shell', bash: 'Bash', yml: 'YAML', yaml: 'YAML', sql: 'SQL',
+      };
+      return labels[ext] ?? '';
+    }
+
+    function stripAnsi(text) {
+      return String(text ?? '').replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, '');
+    }
+
+    function redactSnippet(text) {
+      return String(text ?? '')
+        .replace(/sk-[A-Za-z0-9_-]{12,}/gu, '[redacted-key]')
+        .replace(/gh[pousr]_[A-Za-z0-9]{12,}/gu, '[redacted-token]')
+        .replace(/xox[baprs]-[A-Za-z0-9-]{10,}/gu, '[redacted-token]')
+        .replace(/AKIA[0-9A-Z]{16}/gu, '[redacted-key]')
+        .replace(/\/home\/[^/\s]+/gu, '~')
+        .replace(/\/Users\/[^/\s]+/gu, '~');
+    }
+
+    function sanitizeSnippet(text, max = 600) {
+      let clean = stripAnsi(text)
+        .replace(/\r\n?/gu, '\n')
+        .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '')
+        .replace(/[ \t]+\n/gu, '\n')
+        .replace(/\n{3,}/gu, '\n\n')
+        .trim();
+      clean = redactSnippet(clean);
+      return Array.from(clean).slice(0, max).join('');
+    }
+
+    /**
+     * Build a local, deterministic description of the latest reliable work item.
+     * Only the loaded Chat window is used: the current running call and the last
+     * committed node. It never reads the filesystem, git, unloaded history, or
+     * image pixels.
+     * @param {{lastNode: any, runningCall: any}} input
+     * @returns {{kind: string, summary: string, snippet: string}}
+     */
+    function extractWorkContent({ lastNode, runningCall }) {
+      const empty = { kind: 'none', summary: '', snippet: '' };
+      const runName = String(runningCall?.name ?? '');
+      const callArgs = String(runningCall?.argsRaw ?? '');
+      const callFile = extractFile(callArgs);
+      const callCommand = extractCommandLine(callArgs);
+
+      if (runName === 'write' || runName === 'edit') {
+        const content = extractStringArg(callArgs, 'content') || extractStringArg(callArgs, 'new_string');
+        const verb = runName === 'edit' ? '编辑' : '写入';
+        if (content !== '') {
+          return {
+            kind: 'edit',
+            summary: clipLine(`${verb} ${callFile || '文件'}，约 ${countLines(content)} 行`, 160),
+            snippet: sanitizeSnippet(content),
+          };
+        }
+        return { kind: 'edit', summary: clipLine(`正在${verb} ${callFile || '文件'}`, 160), snippet: '' };
+      }
+      if (runName === 'read' || runName === 'read_image') {
+        return { kind: 'file', summary: clipLine(`正在读取 ${callFile || '文件'}`, 160), snippet: '' };
+      }
+      if (runName === 'grep' || runName === 'glob') {
+        return { kind: 'search', summary: clipLine(`正在搜索 ${callFile || '项目'}`, 160), snippet: '' };
+      }
+      if (runName === 'bash' || runName === 'pwsh' || runName === 'job_output') {
+        return { kind: 'command', summary: clipLine(`命令 ${firstToken(callCommand) || 'shell'} 运行中`, 160), snippet: '' };
+      }
+      // A different running tool means the previous node's content is stale.
+      if (runningCall !== null) return empty;
+
+      if (lastNode?.kind !== 'tool-result' && lastNode?.kind !== 'assistant') return empty;
+      if (lastNode.kind === 'assistant') {
+        const fullText = assistantText(lastNode.blocks);
+        if (fullText.trim() === '') return empty;
+        const lines = countLines(fullText);
+        const chars = Array.from(fullText).length;
+        return {
+          kind: 'assistant',
+          summary: clipLine(`助手输出 ${lines} 行，${chars} 字`, 160),
+          snippet: sanitizeSnippet(fullText),
+        };
+      }
+
+      const name = String(lastNode.name ?? '');
+      const resultArgs = String(lastNode.call?.argsRaw ?? '');
+      const file = extractFile(resultArgs);
+      const commandLine = extractCommandLine(resultArgs);
+      const fullResult = stripAnsi(contentText(lastNode.content)).trim();
+      const result = sanitizeSnippet(fullResult);
+
+      if (name === 'read' || name === 'read_image') {
+        if (fullResult === '') return empty;
+        const language = languageOf(file);
+        return {
+          kind: 'file',
+          summary: clipLine(`读取 ${file || '文件'}${language ? `（${language}）` : ''}，${countLines(fullResult)} 行`, 160),
+          snippet: result,
+        };
+      }
+      if (name === 'grep' || name === 'glob' || name === 'session_search') {
+        if (fullResult === '') return empty;
+        return {
+          kind: 'search',
+          summary: clipLine(`搜索 ${file || '项目'}，${countLines(fullResult)} 行结果`, 160),
+          snippet: result,
+        };
+      }
+      if (name === 'bash' || name === 'pwsh' || name === 'job_output' || name === 'terminal_read') {
+        if (fullResult === '') return { kind: 'command', summary: clipLine(`命令 ${firstToken(commandLine) || 'shell'} 已结束`, 160), snippet: '' };
+        const exit = /\[exit code:\s*([1-9]\d*)\]/u.exec(fullResult);
+        const failed = lastNode.isError === true || exit !== null;
+        return {
+          kind: 'command',
+          summary: clipLine(
+            `命令 ${firstToken(commandLine) || 'shell'} ${failed ? '失败' : '完成'}，输出 ${countLines(fullResult)} 行${exit ? `，退出码 ${exit[1]}` : ''}`,
+            160,
+          ),
+          snippet: result,
+        };
+      }
+      if (name === 'write' || name === 'edit') {
+        const content = extractStringArg(resultArgs, 'content') || extractStringArg(resultArgs, 'new_string');
+        const verb = name === 'edit' ? '编辑' : '写入';
+        if (content !== '') {
+          return {
+            kind: 'edit',
+            summary: clipLine(`${verb} ${file || '文件'}，约 ${countLines(content)} 行`, 160),
+            snippet: sanitizeSnippet(content),
+          };
+        }
+        return { kind: 'edit', summary: clipLine(`${verb} ${file || '文件'}完成`, 160), snippet: '' };
+      }
+      if (name === 'present') {
+        return { kind: 'file', summary: clipLine(`展示 ${file || '成品'}`, 160), snippet: '' };
+      }
+      return empty;
     }
 
     function toolFailed(node) {
@@ -383,6 +737,9 @@ window.__ModuleLoader__.load({
       const frontend = isFrontendFile(file) ||
         isFrontendCommand(commandLine) ||
         /(?:前端|页面|界面|样式|UI)/iu.test(String(input.recentUserText ?? ''));
+      const content = input.contentDepth === 'off'
+        ? { kind: 'none', summary: '', snippet: '' }
+        : extractWorkContent({ lastNode, runningCall });
 
       const tools = String(input.recentTools ?? '').split(',').filter(Boolean);
       const repeatTool = tools.length >= 3 && tools[0] === tools[1] && tools[1] === tools[2];
@@ -410,6 +767,9 @@ window.__ModuleLoader__.load({
         thought,
         outcome: error ? 'error' : running ? 'running' : 'ok',
         repeatTool,
+        contentKind: content.kind,
+        contentSummary: content.summary,
+        contentSnippet: content.snippet,
         beatKey,
         priority,
         llmEligible,
@@ -494,12 +854,13 @@ window.__ModuleLoader__.load({
       visible,
       unavailable,
       backoffUntil,
-      minIntervalMs = CFG.llmMinIntervalMs,
+      policy = 'low',
     }) {
-      if (!signal?.llmEligible) return false;
+      const normalized = normalizeLlmPolicy(policy);
+      if (normalized === 'off' || !signal?.llmEligible) return false;
       if (inFlight || !visible || unavailable) return false;
       if (now - mountedAt < 5000) return false;
-      if (now - lastLlmAt < minIntervalMs) return false;
+      if (now - lastLlmAt < policyMinInterval(normalized)) return false;
       if (backoffUntil > now) return false;
       return true;
     }
@@ -537,8 +898,21 @@ window.__ModuleLoader__.load({
       return dir > 0 ? 'scaleX(-1)' : 'scaleX(1)';
     }
 
-    function toObservation(signal) {
-      return {
+    /**
+     * How long a replacement must wait so the current bubble is not flashed.
+     * @param {number} shownAt
+     * @param {number} now
+     * @param {boolean} visible
+     * @param {number} minDwellMs
+     * @returns {number}
+     */
+    function speechDelayMs(shownAt, now, visible, minDwellMs) {
+      if (!visible || !(shownAt > 0)) return 0;
+      return Math.max(0, minDwellMs - Math.max(0, now - shownAt));
+    }
+
+    function toObservation(signal, depth = 'off') {
+      const observation = {
         mode: signal.mode,
         kind: signal.kind,
         ...(signal.tool ? { tool: signal.tool } : {}),
@@ -548,6 +922,14 @@ window.__ModuleLoader__.load({
         thought: signal.thought ?? 'none',
         outcome: signal.outcome ?? 'running',
       };
+      if (depth !== 'off' && signal.contentSummary) {
+        observation.contentKind = signal.contentKind ?? 'none';
+        observation.contentSummary = signal.contentSummary;
+        if (depth === 'snippet' && signal.contentSnippet) {
+          observation.contentSnippet = signal.contentSnippet;
+        }
+      }
+      return observation;
     }
 
     // ---------------------------------------------------------------------
@@ -664,6 +1046,59 @@ window.__ModuleLoader__.load({
       ]);
     }
 
+    /**
+     * One General-settings row. The choice lives in this browser's storage and
+     * feeds both the settings row and every mounted companion through a tiny
+     * external store, so switching it takes effect without a reload.
+     */
+    function LlmPolicyRow({ t }) {
+      const policy = useLlmPolicy();
+      const title = typeof t === 'function' ? t('settings.llm.title') : '旁白 LLM 频率';
+      const description = typeof t === 'function'
+        ? t('settings.llm.description')
+        : '控制旁白模型调用频率；设置保存在当前浏览器。';
+      return h('div', { className: 'whalestory-pref-row' }, [
+        h('div', { key: 'text', className: 'whalestory-pref-text' }, [
+          h('div', { key: 'title', className: 'whalestory-pref-title' }, title),
+          h('div', { key: 'desc', className: 'whalestory-pref-desc' }, description),
+        ]),
+        h('select', {
+          key: 'select',
+          className: 'whalestory-pref-select',
+          value: policy,
+          'aria-label': title,
+          onChange: (event) => setLlmPolicy(event.target.value),
+        }, POLICY_MODES.map((mode) => h('option', {
+          key: mode,
+          value: mode,
+        }, typeof t === 'function' ? t(POLICY_LABEL_KEYS[mode]) : mode))),
+      ]);
+    }
+
+    function ContentDepthRow({ t }) {
+      const depth = useContentDepth();
+      const title = typeof t === 'function' ? t('settings.depth.title') : '内容感知深度';
+      const description = typeof t === 'function'
+        ? t('settings.depth.description')
+        : '摘要只发送本地统计；片段会发送有限、脱敏后的已读取内容。';
+      return h('div', { className: 'whalestory-pref-row' }, [
+        h('div', { key: 'text', className: 'whalestory-pref-text' }, [
+          h('div', { key: 'title', className: 'whalestory-pref-title' }, title),
+          h('div', { key: 'desc', className: 'whalestory-pref-desc' }, description),
+        ]),
+        h('select', {
+          key: 'select',
+          className: 'whalestory-pref-select',
+          value: depth,
+          'aria-label': title,
+          onChange: (event) => setContentDepth(event.target.value),
+        }, DEPTH_MODES.map((mode) => h('option', {
+          key: mode,
+          value: mode,
+        }, typeof t === 'function' ? t(DEPTH_LABEL_KEYS[mode]) : mode))),
+      ]);
+    }
+
     function Companion(props) {
       const { sessionId, ...rest } = props;
       return h(CompanionBody, { key: String(sessionId), sessionId, ...rest });
@@ -671,6 +1106,8 @@ window.__ModuleLoader__.load({
 
     function CompanionBody({ sessionId, useSession, useChat, useSessionStatus, t }) {
       const reduced = useReducedMotion();
+      const policy = useLlmPolicy();
+      const contentDepth = useContentDepth();
       const running = useSession((snapshot) => snapshot.running === true);
       const lastAgentError = useSession((snapshot) => snapshot.lastAgentError);
       const pending = useSessionStatus((snapshot) => snapshot.get(sessionId)?.pendingInteraction !== undefined);
@@ -734,6 +1171,7 @@ window.__ModuleLoader__.load({
         lastNode,
         recentTools,
         recentUserText,
+        contentDepth,
       }), [
         sessionId,
         running,
@@ -744,6 +1182,7 @@ window.__ModuleLoader__.load({
         lastNode,
         recentTools,
         recentUserText,
+        contentDepth,
       ]);
 
       const [speech, setSpeech] = React.useState(null);
@@ -760,6 +1199,9 @@ window.__ModuleLoader__.load({
       const bubbleVisibleRef = React.useRef(false);
       const hideTimerRef = React.useRef(0);
       const lastSpokenAtRef = React.useRef(0);
+      const speechShownAtRef = React.useRef(0);
+      const pendingSpeechRef = React.useRef(null);
+      const speechDelayTimerRef = React.useRef(0);
       const recentLinesRef = React.useRef([]);
       const lastBeatRef = React.useRef('');
       const currentBeatRef = React.useRef('');
@@ -787,8 +1229,8 @@ window.__ModuleLoader__.load({
         }, CFG.speechMs);
       }, []);
 
-      const showSpeech = React.useCallback((entry) => {
-        if (entry === null || entry === undefined) return false;
+      const showSpeechNow = React.useCallback((entry) => {
+        if (!mountedRef.current) return false;
         const normalized = {
           text: clipLine(entry.text),
           inner: entry.inner === true,
@@ -796,35 +1238,78 @@ window.__ModuleLoader__.load({
         };
         if (normalized.text === '') return false;
         speechRef.current = normalized;
+        speechShownAtRef.current = Date.now();
         setSpeech(normalized);
         setBubbleVisible(true);
         bubbleVisibleRef.current = true;
-        lastSpokenAtRef.current = Date.now();
+        lastSpokenAtRef.current = speechShownAtRef.current;
         recentLinesRef.current = [normalized.text, ...recentLinesRef.current.filter((line) => line !== normalized.text)].slice(0, 5);
         showHideTimer();
         return true;
       }, [showHideTimer]);
+
+      const scheduleSpeech = React.useCallback((entry, minDwellMs) => {
+        if (entry === null || entry === undefined) return false;
+        const normalized = {
+          text: clipLine(entry.text),
+          inner: entry.inner === true,
+          source: entry.source ?? 'local',
+        };
+        if (normalized.text === '') return false;
+        if (speechRef.current?.text === normalized.text) return false;
+        if (pendingSpeechRef.current?.text === normalized.text) return true;
+
+        const now = Date.now();
+        const visible = bubbleVisibleRef.current && speechRef.current !== null;
+        const wait = speechDelayMs(speechShownAtRef.current, now, visible, minDwellMs);
+        if (wait <= 0) {
+          if (speechDelayTimerRef.current !== 0) {
+            clearTimeout(speechDelayTimerRef.current);
+            speechDelayTimerRef.current = 0;
+          }
+          pendingSpeechRef.current = null;
+          return showSpeechNow(normalized);
+        }
+
+        pendingSpeechRef.current = normalized;
+        if (speechDelayTimerRef.current === 0) {
+          speechDelayTimerRef.current = setTimeout(() => {
+            speechDelayTimerRef.current = 0;
+            const pending = pendingSpeechRef.current;
+            pendingSpeechRef.current = null;
+            if (mountedRef.current && pending !== null) showSpeechNow(pending);
+          }, wait);
+        }
+        return true;
+      }, [showSpeechNow]);
+
+      const showSpeech = React.useCallback(
+        (entry) => scheduleSpeech(entry, CFG.minSpeechDwellMs),
+        [scheduleSpeech],
+      );
 
       const replaceSpeech = React.useCallback((text) => {
         const normalized = clipLine(text);
         if (normalized === '') return;
         if (recentLinesRef.current.includes(normalized)) return;
         if (speechRef.current === null) return;
-        const next = { ...speechRef.current, text: normalized, source: 'llm' };
-        speechRef.current = next;
-        setSpeech(next);
-        setBubbleVisible(true);
-        bubbleVisibleRef.current = true;
-        lastSpokenAtRef.current = Date.now();
-        recentLinesRef.current = [normalized, ...recentLinesRef.current].slice(0, 5);
-        showHideTimer();
-      }, [showHideTimer]);
+        scheduleSpeech(
+          { text: normalized, inner: false, source: 'llm' },
+          CFG.llmReplaceDelayMs,
+        );
+      }, [scheduleSpeech]);
 
       React.useEffect(() => () => {
         mountedRef.current = false;
         if (hideTimerRef.current !== 0) clearTimeout(hideTimerRef.current);
+        if (speechDelayTimerRef.current !== 0) clearTimeout(speechDelayTimerRef.current);
+        pendingSpeechRef.current = null;
         llmAbortRef.current?.abort?.();
       }, []);
+
+      React.useEffect(() => {
+        if (policy === 'off') llmAbortRef.current?.abort?.();
+      }, [policy]);
 
       // Measure the stage, actor, and bubble. Re-measure when a bubble appears.
       React.useLayoutEffect(() => {
@@ -946,6 +1431,7 @@ window.__ModuleLoader__.load({
           visible: typeof document === 'undefined' || document.visibilityState !== 'hidden',
           unavailable: llmUnavailableRef.current,
           backoffUntil: llmBackoffUntilRef.current,
+          policy,
         })) return;
 
         llmInFlightRef.current = true;
@@ -963,7 +1449,9 @@ window.__ModuleLoader__.load({
             body: JSON.stringify({
               clientId: CLIENT_ID,
               sessionKey: hashString(String(sessionId)).toString(36),
-              observation: toObservation(beat),
+              policy,
+              contentDepth,
+              observation: toObservation(beat, contentDepth),
             }),
             signal: controller.signal,
           });
@@ -994,7 +1482,7 @@ window.__ModuleLoader__.load({
           if (llmAbortRef.current === controller) llmAbortRef.current = null;
           llmInFlightRef.current = false;
         }
-      }, [replaceSpeech, sessionId]);
+      }, [replaceSpeech, sessionId, policy, contentDepth]);
 
       // One local line per narrative beat. LLM enhancement never delays it.
       React.useEffect(() => {
@@ -1034,10 +1522,13 @@ window.__ModuleLoader__.load({
           const picked = pickLocalLine(idleSignal, recentLinesRef.current, Date.now());
           if (picked === null) return;
           currentBeatRef.current = idleSignal.beatKey;
-          showSpeech({ ...picked, source: 'local' });
+          const spoken = showSpeech({ ...picked, source: 'local' });
+          if (spoken && getLlmPolicy() === 'always') {
+            requestLlm({ ...idleSignal, llmEligible: true });
+          }
         }, 5000);
         return () => clearInterval(timer);
-      }, [showSpeech]);
+      }, [showSpeech, requestLlm]);
 
       const mode = modeOf(signal);
       const walking = mode === 'walk' && !reduced;
@@ -1105,7 +1596,7 @@ window.__ModuleLoader__.load({
           }),
           h('div', {
             key: 'text',
-            className: `whalestory-bubble-text${speech?.inner ? ' is-inner' : ''}`,
+            className: `whalestory-bubble-text${speech?.inner ? ' is-inner' : ''}${speech ? ` ${bubbleTextDensity(speech.text)}` : ''}`.trim(),
           }, h('span', null, speech?.text ?? '')),
         ]),
       ]);
@@ -1246,6 +1737,18 @@ window.__ModuleLoader__.load({
   color:#53657c;
   font-weight:500;
 }
+.whalestory-bubble-text.is-compact{
+  font-size:12px;
+  line-height:1.3;
+}
+.whalestory-bubble-text.is-dense{
+  font-size:10px;
+  line-height:1.25;
+  letter-spacing:0;
+}
+.whalestory-bubble-text.is-dense>span{
+  -webkit-line-clamp:3;
+}
 @keyframes whalestory-bob{
   from{transform:translateY(0)}
   to{transform:translateY(-3px)}
@@ -1322,10 +1825,62 @@ window.__ModuleLoader__.load({
   animation:whalestory-bob 3s ease-in-out infinite alternate;
   transform-origin:center bottom;
 }
+.whalestory-pref-row{
+  box-sizing:border-box;
+  border-bottom:.5px solid var(--dsw-alias-border-l2);
+  align-items:center;
+  gap:8px;
+  padding:16px 0;
+  display:flex;
+}
+.whalestory-pref-text{
+  flex-direction:column;
+  flex:1;
+  gap:4px;
+  min-width:0;
+  padding-right:48px;
+  display:flex;
+}
+.whalestory-pref-title{
+  color:var(--dsw-alias-label-primary);
+  font-size:14px;
+  font-weight:400;
+  line-height:22px;
+}
+.whalestory-pref-desc{
+  color:var(--dsw-alias-label-tertiary);
+  font-size:12px;
+  font-weight:400;
+  line-height:18px;
+}
+.whalestory-pref-select{
+  border-radius:var(--dsw-radius-md);
+  background:var(--dsw-alias-bg-module-platform);
+  height:36px;
+  color:var(--dsw-alias-label-primary);
+  cursor:pointer;
+  border:none;
+  padding:0 12px;
+  font:inherit;
+  font-size:14px;
+  line-height:22px;
+}
+.whalestory-pref-select:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.whalestory-pref-select:focus-visible{
+  outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));
+  outline-offset:2px;
+}
 @media (max-width:640px){
   .whalestory-stage{--ws-char-h:84px;--ws-bubble-w:190px;--ws-bubble-h:104px;height:104px}
   .whalestory-bubble-text{font-size:12px}
+  .whalestory-bubble-text.is-compact{font-size:11.5px}
+  .whalestory-bubble-text.is-compact>span{-webkit-line-clamp:3}
+  .whalestory-bubble-text.is-dense{font-size:10px;line-height:1.2}
+  .whalestory-bubble-text.is-dense>span{-webkit-line-clamp:3}
   .whalestory-peek{top:84px;right:8px;transform:scale(.82);transform-origin:top right}
+  .whalestory-pref-row{align-items:flex-start;flex-direction:column}
+  .whalestory-pref-text{padding-right:0}
+  .whalestory-pref-select{width:100%}
 }
 @media (prefers-reduced-motion:reduce){
   .whalestory-bob,.whalestory-frame-a,.whalestory-frame-b,.whalestory-peek-char{animation:none !important}
@@ -1345,6 +1900,27 @@ window.__ModuleLoader__.load({
           document.head.appendChild(style);
           return () => style.remove();
         }, 'whalestory: styles');
+        ctx.effect(() => {
+          if (typeof window === 'undefined') return undefined;
+          const onStorage = (event) => {
+            if (event.key === POLICY_KEY || event.key === null) refreshLlmPolicy();
+            if (event.key === DEPTH_KEY || event.key === null) refreshContentDepth();
+          };
+          window.addEventListener('storage', onStorage);
+          return () => window.removeEventListener('storage', onStorage);
+        }, 'whalestory: policy cross-tab sync');
+        ctx.slots.inject('settings.general.item', () => ctx.slots.register({
+          name: 'settings.general.item',
+          id: 'content-depth',
+          order: 44,
+          locale: 'whalestory',
+        }, ContentDepthRow));
+        ctx.slots.inject('settings.general.item', () => ctx.slots.register({
+          name: 'settings.general.item',
+          id: 'llm-policy',
+          order: 45,
+          locale: 'whalestory',
+        }, LlmPolicyRow));
         ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
           name: 'conversation.input.dock',
           id: 'whalestory-companion',
@@ -1361,6 +1937,7 @@ window.__ModuleLoader__.load({
       __test: {
         PHRASES,
         clipLine,
+        bubbleTextDensity,
         hashString,
         basename,
         extractFile,
@@ -1374,9 +1951,19 @@ window.__ModuleLoader__.load({
         deriveSignal,
         pickLocalLine,
         shouldUseLlm,
+        normalizeLlmPolicy,
+        policyMinInterval,
+        getLlmPolicy,
+        setLlmPolicy,
+        normalizeContentDepth,
+        getContentDepth,
+        setContentDepth,
+        sanitizeSnippet,
+        extractWorkContent,
         stepWalker,
         bubblePlacement,
         walkFlip,
+        speechDelayMs,
         peekLineFor,
         toObservation,
       },

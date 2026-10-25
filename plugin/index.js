@@ -15,9 +15,12 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
 import {
+  LLM_POLICIES,
   MAX_OBSERVATION_BYTES,
   MAX_OUTPUT_TOKENS,
   generateNarration,
+  normalizeContentDepth,
+  normalizeLlmPolicy,
   normalizeObservation,
   shortField,
 } from './narrate.js';
@@ -39,10 +42,7 @@ const ASSET_NAMES = new Set([
 ]);
 
 const LLM_WINDOW_MS = 10 * 60 * 1000;
-const LLM_MAX_PER_WINDOW = 20;
 const LLM_GLOBAL_WINDOW_MS = 60 * 60 * 1000;
-const LLM_GLOBAL_MAX = 30;
-const LLM_MIN_INTERVAL_MS = 45_000;
 const LLM_TIMEOUT_MS = 6000;
 
 /** Boot-time client constants; no secrets. */
@@ -50,12 +50,15 @@ export const PUBLIC_CONFIG = Object.freeze({
   assetBase: ASSET_BASE,
   narratePath: NARRATE_PATH,
   llmEnabled: true,
-  llmMinIntervalMs: LLM_MIN_INTERVAL_MS,
+  llmMinIntervalMs: LLM_POLICIES.low.minIntervalMs,
+  llmPolicies: LLM_POLICIES,
   llmTimeoutMs: LLM_TIMEOUT_MS,
   llmMaxOutputTokens: MAX_OUTPUT_TOKENS,
   walkSpeedPxPerSecond: 42,
   frameMs: 220,
   speechMs: 6500,
+  minSpeechDwellMs: 2800,
+  llmReplaceDelayMs: 1200,
   idleSpeechMs: 24000,
   minSpeechGapMs: 3500,
   milestoneTools: 6,
@@ -162,13 +165,17 @@ export function apply(ctx) {
   let globalWindowStart = Date.now();
   let globalCount = 0;
 
-  const allow = (key, now) => {
+  const allow = (key, now, policy) => {
+    const limits = LLM_POLICIES[policy];
+    if (limits === undefined || policy === 'off') {
+      return { ok: false, retryAfter: 3600 };
+    }
     if (inFlight) return { ok: false, retryAfter: 2 };
     if (now - globalWindowStart >= LLM_GLOBAL_WINDOW_MS) {
       globalWindowStart = now;
       globalCount = 0;
     }
-    if (globalCount >= LLM_GLOBAL_MAX) {
+    if (globalCount >= limits.globalPerHour) {
       return { ok: false, retryAfter: Math.max(1, Math.ceil((globalWindowStart + LLM_GLOBAL_WINDOW_MS - now) / 1000)) };
     }
 
@@ -178,9 +185,9 @@ export function apply(ctx) {
       buckets.delete(key);
     }
     if (bucket !== undefined) {
-      const wait = LLM_MIN_INTERVAL_MS - (now - bucket.lastAt);
+      const wait = limits.minIntervalMs - (now - bucket.lastAt);
       if (wait > 0) return { ok: false, retryAfter: Math.ceil(wait / 1000) };
-      if (bucket.count >= LLM_MAX_PER_WINDOW) {
+      if (bucket.count >= limits.perWindow) {
         return { ok: false, retryAfter: Math.max(1, Math.ceil((bucket.windowStart + LLM_WINDOW_MS - now) / 1000)) };
       }
     }
@@ -252,9 +259,16 @@ export function apply(ctx) {
           return;
         }
 
-        const observation = normalizeObservation(body?.observation);
+        const policy = normalizeLlmPolicy(body?.policy);
+        const contentDepth = normalizeContentDepth(body?.contentDepth);
+        const observation = normalizeObservation(body?.observation, contentDepth);
         if (observation === null) {
           res.writeHead(400);
+          res.end();
+          return;
+        }
+        if (policy === 'off') {
+          res.writeHead(403, { 'x-whalestory-error': 'POLICY_OFF' });
           res.end();
           return;
         }
@@ -263,7 +277,7 @@ export function apply(ctx) {
         const sessionKey = shortField(body?.sessionKey, 64).replace(/[^A-Za-z0-9_-]/gu, '') || 'anon';
         const bucketKey = `${clientId}:${sessionKey}`;
         const now = Date.now();
-        const decision = allow(bucketKey, now);
+        const decision = allow(bucketKey, now, policy);
         if (!decision.ok) {
           res.writeHead(429, { 'retry-after': String(decision.retryAfter) });
           res.end();
