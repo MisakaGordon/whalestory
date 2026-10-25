@@ -446,11 +446,11 @@ test('content snippets are redacted and capped', () => {
 
 test('content depth store persists and normalizes bad values', () => {
   assert.equal(T.normalizeContentDepth('summary'), 'summary');
-  assert.equal(T.normalizeContentDepth('nope'), 'summary');
+  assert.equal(T.normalizeContentDepth('nope'), 'off');
   T.setContentDepth('snippet');
   assert.equal(T.getContentDepth(), 'snippet');
   T.setContentDepth('bogus');
-  assert.equal(T.getContentDepth(), 'summary');
+  assert.equal(T.getContentDepth(), 'off');
 });
 
 test('observation object sends only the allow-listed compact fields', () => {
@@ -475,6 +475,15 @@ test('observation object sends only the allow-listed compact fields', () => {
   assert.equal('beatKey' in observation, false);
   assert.equal('seed' in observation, false);
   assert.ok(!JSON.stringify(observation).includes('不该发送'));
+});
+
+test('usage counts format compactly', () => {
+  assert.equal(T.formatCompactCount(0), '0');
+  assert.equal(T.formatCompactCount(999), '999');
+  assert.equal(T.formatCompactCount(1000), '1k');
+  assert.equal(T.formatCompactCount(1250), '1.3k');
+  assert.equal(T.formatCompactCount(1_000_000), '1M');
+  assert.equal(T.formatCompactCount(Number.NaN), '0');
 });
 
 test('long bubble lines shrink to compact and dense sizes', () => {

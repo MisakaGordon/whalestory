@@ -230,6 +230,24 @@ test('generateNarration returns null on finish errors and missing route', async 
   }), null);
 });
 
+test('generateNarration captures provider usage for the meter', async () => {
+  const llm = fakeLlm([
+    { type: 'text-delta', text: '本鱼在写了。' },
+    { type: 'usage', usage: { inputTokens: 123, outputTokens: 45 } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]);
+  const diagnostics = {};
+  const text = await generateNarration({
+    llm,
+    selection: { provider: 'p', model: 'm' },
+    observation: { mode: 'writing', kind: 'milestone' },
+    signal: new AbortController().signal,
+    diagnostics,
+  });
+  assert.equal(text, '本鱼在写了。');
+  assert.deepEqual(diagnostics.usage, { inputTokens: 123, outputTokens: 45 });
+});
+
 test('generateNarration uses low when off is unsupported', async () => {
   const capture = {};
   const llm = fakeLlm([

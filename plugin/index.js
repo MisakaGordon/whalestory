@@ -14,6 +14,7 @@ import { stat } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
+import { createUsageMeter } from './usage.js';
 import {
   LLM_POLICIES,
   MAX_OBSERVATION_BYTES,
@@ -30,6 +31,7 @@ export const inject = ['webServer'];
 const ASSET_DIR = fileURLToPath(new URL('./assets/', import.meta.url));
 const ASSET_BASE = '/whalestory/assets';
 const NARRATE_PATH = '/whalestory/narrate';
+const USAGE_PATH = '/whalestory/usage';
 
 const ASSET_NAMES = new Set([
   'normal.webp',
@@ -49,6 +51,7 @@ const LLM_TIMEOUT_MS = 6000;
 export const PUBLIC_CONFIG = Object.freeze({
   assetBase: ASSET_BASE,
   narratePath: NARRATE_PATH,
+  usagePath: USAGE_PATH,
   llmEnabled: true,
   llmMinIntervalMs: LLM_POLICIES.low.minIntervalMs,
   llmPolicies: LLM_POLICIES,
@@ -147,10 +150,49 @@ async function readJsonBody(req, maxBytes) {
  * @param {import('@deepseek-ai/cordis').Context} ctx
  */
 export function apply(ctx) {
+  const usageMeter = createUsageMeter();
+
   ctx.effect(
     () => ctx.webServer.register({ kind: 'prefix', path: ASSET_BASE, handler: serveAsset }),
     'whalestory: static artwork route',
   );
+
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: USAGE_PATH,
+    handler: (req, res) => {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { allow: 'GET' });
+        res.end();
+        return;
+      }
+      if (req.headers['x-whalestory'] !== '1') {
+        res.writeHead(403);
+        res.end();
+        return;
+      }
+      const origin = req.headers.origin;
+      if (typeof origin === 'string') {
+        let originHost;
+        try {
+          originHost = new URL(origin).host;
+        } catch {
+          originHost = '';
+        }
+        if (originHost === '' || (typeof req.headers.host === 'string' && originHost !== req.headers.host)) {
+          res.writeHead(403);
+          res.end();
+          return;
+        }
+      }
+      res.writeHead(200, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+      });
+      res.end(JSON.stringify(usageMeter.snapshot()));
+    },
+  }), 'whalestory: usage route');
 
   ctx.effect(
     () => ctx.on('webserver/index-inject', (table) => {
@@ -268,6 +310,7 @@ export function apply(ctx) {
           return;
         }
         if (policy === 'off') {
+          usageMeter.blocked();
           res.writeHead(403, { 'x-whalestory-error': 'POLICY_OFF' });
           res.end();
           return;
@@ -279,19 +322,22 @@ export function apply(ctx) {
         const now = Date.now();
         const decision = allow(bucketKey, now, policy);
         if (!decision.ok) {
+          usageMeter.limited();
           res.writeHead(429, { 'retry-after': String(decision.retryAfter) });
           res.end();
           return;
         }
 
         commit(bucketKey, decision.bucket, now);
+        usageMeter.attempt(policy, contentDepth);
         const controller = new AbortController();
         activeControllers.add(controller);
         const timer = setTimeout(() => controller.abort(), LLM_TIMEOUT_MS);
+        const diagnostics = {};
+        let outcome = 'error';
 
         try {
           const selection = child.agentDefaultModel.currentSelection();
-          const diagnostics = {};
           const text = await generateNarration({
             llm: child.llm,
             selection,
@@ -301,12 +347,14 @@ export function apply(ctx) {
             diagnostics,
           });
           if (text === null) {
+            outcome = 'empty';
             res.writeHead(204, {
               'x-whalestory-error': String(diagnostics.reason ?? 'UNKNOWN').slice(0, 64),
             });
             res.end();
             return;
           }
+          outcome = 'ok';
           res.writeHead(200, {
             'content-type': 'application/json; charset=utf-8',
             'cache-control': 'no-store',
@@ -327,6 +375,7 @@ export function apply(ctx) {
           }
           res.end();
         } finally {
+          usageMeter.result({ policy, depth: contentDepth, outcome, usage: diagnostics.usage });
           clearTimeout(timer);
           activeControllers.delete(controller);
           inFlight = false;

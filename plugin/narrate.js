@@ -291,6 +291,12 @@ export async function generateNarration({
     if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') streamed += chunk.text;
     else if (chunk?.type === 'block-end' && chunk.block?.type === 'text' && typeof chunk.block.text === 'string') fallback += chunk.block.text;
     else if (chunk?.type === 'finish') finish = chunk.reason;
+    else if (chunk?.type === 'usage' && chunk.usage !== undefined && diagnostics !== undefined) {
+      diagnostics.usage = {
+        inputTokens: Number(chunk.usage.inputTokens),
+        outputTokens: Number(chunk.usage.outputTokens),
+      };
+    }
   }
   if (finish?.kind === 'error' || finish?.kind === 'aborted') {
     note(`FINISH_${finish.kind.toUpperCase()}`);

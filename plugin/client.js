@@ -15,6 +15,7 @@ window.__ModuleLoader__.load({
     const DEFAULT_CONFIG = {
       assetBase: '/whalestory/assets',
       narratePath: '/whalestory/narrate',
+      usagePath: '/whalestory/usage',
       llmEnabled: true,
       llmMinIntervalMs: 45000,
       llmPolicies: {
@@ -38,6 +39,7 @@ window.__ModuleLoader__.load({
     const CFG = Object.assign({}, DEFAULT_CONFIG, globalThis.__WHALESTORY_CONFIG__ ?? {});
     const assetBase = String(CFG.assetBase ?? '/whalestory/assets').replace(/\/+$/u, '');
     const narratePath = String(CFG.narratePath ?? '/whalestory/narrate');
+    const usagePath = String(CFG.usagePath ?? '/whalestory/usage');
     const MAX_LOCAL_CHARS = 36;
 
     const POLICY_KEY = 'whalestory:llm-policy';
@@ -128,14 +130,14 @@ window.__ModuleLoader__.load({
     const contentDepthListeners = new Set();
 
     function normalizeContentDepth(value) {
-      return DEPTH_MODES.includes(value) ? value : 'summary';
+      return DEPTH_MODES.includes(value) ? value : 'off';
     }
 
     function readStoredContentDepth() {
       try {
         return normalizeContentDepth(globalThis.localStorage?.getItem(DEPTH_KEY));
       } catch {
-        return 'summary';
+        return 'off';
       }
     }
 
@@ -186,6 +188,53 @@ window.__ModuleLoader__.load({
       return React.useSyncExternalStore(subscribeContentDepth, getContentDepth, getContentDepth);
     }
 
+    function formatCompactCount(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number) || number <= 0) return '0';
+      if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(1).replace(/\.0$/u, '')}M`;
+      if (number >= 1_000) return `${(number / 1_000).toFixed(1).replace(/\.0$/u, '')}k`;
+      return String(Math.round(number));
+    }
+
+    async function fetchUsage(signal) {
+      const response = await fetch(usagePath, {
+        method: 'GET',
+        headers: { 'x-whalestory': '1' },
+        cache: 'no-store',
+        signal,
+      });
+      if (!response.ok) throw new Error(`usage ${response.status}`);
+      return response.json();
+    }
+
+    function useUsagePoll(active) {
+      const [state, setState] = React.useState({ usage: null, failed: false });
+      React.useEffect(() => {
+        if (!active) return undefined;
+        let cancelled = false;
+        let timer = 0;
+        let controller;
+        const load = async () => {
+          controller = new AbortController();
+          try {
+            const usage = await fetchUsage(controller.signal);
+            if (!cancelled) setState({ usage, failed: false });
+          } catch {
+            if (!cancelled) setState((previous) => ({ usage: previous.usage, failed: true }));
+          } finally {
+            if (!cancelled) timer = setTimeout(load, 5000);
+          }
+        };
+        load();
+        return () => {
+          cancelled = true;
+          controller?.abort?.();
+          if (timer !== 0) clearTimeout(timer);
+        };
+      }, [active]);
+      return state;
+    }
+
     const ZH = {
       'aria.stage': '大肥鱼伴游',
       'settings.llm.title': '旁白 LLM 频率',
@@ -195,10 +244,24 @@ window.__ModuleLoader__.load({
       'settings.llm.high': '高频率',
       'settings.llm.always': '总是使用 LLM',
       'settings.depth.title': '内容感知深度',
-      'settings.depth.description': '摘要只发送本地统计（文件、行数、退出码）；片段会发送有限、脱敏后的已读取内容。',
+      'settings.depth.description': '默认关闭。摘要只发送本地统计（文件、行数、退出码）；片段会发送有限、脱敏后的已读取内容。',
       'settings.depth.off': '关闭',
       'settings.depth.summary': '摘要（推荐）',
       'settings.depth.snippet': '片段',
+      'settings.depth.warningTitle': '用量与隐私提示',
+      'settings.depth.warningPrivacy': '开启内容感知会增加旁白 LLM 的 token 用量。摘要只发送本地统计；片段会把最多约 600 字的脱敏内容发送给旁白模型提供方。',
+      'settings.depth.warningUsage': '本次运行：',
+      'settings.usage.title': '旁白 LLM 用量',
+      'settings.usage.description': '本次运行统计；重启 Host 后清零。只记录次数和 token，不记录提示词或内容。',
+      'settings.usage.loading': '读取中…',
+      'settings.usage.unavailable': '用量暂不可用',
+      'settings.usage.calls': '调用',
+      'settings.usage.ok': '成功',
+      'settings.usage.empty': '空回复',
+      'settings.usage.errors': '错误',
+      'settings.usage.limited': '限流',
+      'settings.usage.tokensIn': '输入',
+      'settings.usage.tokensOut': '输出',
     };
     const EN = {
       'aria.stage': 'Da Feiyu companion',
@@ -209,10 +272,24 @@ window.__ModuleLoader__.load({
       'settings.llm.high': 'High',
       'settings.llm.always': 'Always use LLM',
       'settings.depth.title': 'Content awareness',
-      'settings.depth.description': 'Summary sends local statistics only (file, line count, exit code); Snippet also sends a small, redacted excerpt of content already read.',
+      'settings.depth.description': 'Off by default. Summary sends local statistics only (file, line count, exit code); Snippet also sends a small, redacted excerpt of content already read.',
       'settings.depth.off': 'Off',
       'settings.depth.summary': 'Summary (recommended)',
       'settings.depth.snippet': 'Snippet',
+      'settings.depth.warningTitle': 'Usage and privacy',
+      'settings.depth.warningPrivacy': 'Content awareness increases narrator token usage. Summary sends local statistics only; Snippet sends up to about 600 redacted characters to the narrator model provider.',
+      'settings.depth.warningUsage': 'This run: ',
+      'settings.usage.title': 'Narrator LLM usage',
+      'settings.usage.description': 'This Host run only; resets on restart. Counts and tokens only, never prompts or content.',
+      'settings.usage.loading': 'Loading…',
+      'settings.usage.unavailable': 'Usage unavailable',
+      'settings.usage.calls': 'Calls',
+      'settings.usage.ok': 'OK',
+      'settings.usage.empty': 'Empty',
+      'settings.usage.errors': 'Errors',
+      'settings.usage.limited': 'Limited',
+      'settings.usage.tokensIn': 'Input',
+      'settings.usage.tokensOut': 'Output',
     };
 
     const STILL_IMAGES = {
@@ -1077,25 +1154,76 @@ window.__ModuleLoader__.load({
 
     function ContentDepthRow({ t }) {
       const depth = useContentDepth();
-      const title = typeof t === 'function' ? t('settings.depth.title') : '内容感知深度';
-      const description = typeof t === 'function'
-        ? t('settings.depth.description')
-        : '摘要只发送本地统计；片段会发送有限、脱敏后的已读取内容。';
-      return h('div', { className: 'whalestory-pref-row' }, [
-        h('div', { key: 'text', className: 'whalestory-pref-text' }, [
-          h('div', { key: 'title', className: 'whalestory-pref-title' }, title),
-          h('div', { key: 'desc', className: 'whalestory-pref-desc' }, description),
+      const { usage, failed } = useUsagePoll(depth !== 'off');
+      const tr = (key, fallback) => typeof t === 'function' ? t(key) : fallback;
+      const title = tr('settings.depth.title', '内容感知深度');
+      const description = tr(
+        'settings.depth.description',
+        '默认关闭。摘要只发送本地统计；片段会发送有限、脱敏后的已读取内容。',
+      );
+      const warningUsage = failed
+        ? tr('settings.usage.unavailable', '用量暂不可用')
+        : usage === null
+          ? tr('settings.usage.loading', '读取中…')
+          : `${tr('settings.depth.warningUsage', '本次运行：')}${tr('settings.usage.calls', '调用')} ${usage.totals.calls} · ${tr('settings.usage.tokensIn', '输入')} ${formatCompactCount(usage.totals.inputTokens)} / ${tr('settings.usage.tokensOut', '输出')} ${formatCompactCount(usage.totals.outputTokens)}`;
+      return h('div', { className: 'whalestory-pref-block' }, [
+        h('div', { key: 'row', className: 'whalestory-pref-row' }, [
+          h('div', { key: 'text', className: 'whalestory-pref-text' }, [
+            h('div', { key: 'title', className: 'whalestory-pref-title' }, title),
+            h('div', { key: 'desc', className: 'whalestory-pref-desc' }, description),
+          ]),
+          h('select', {
+            key: 'select',
+            className: 'whalestory-pref-select',
+            value: depth,
+            'aria-label': title,
+            onChange: (event) => setContentDepth(event.target.value),
+          }, DEPTH_MODES.map((mode) => h('option', {
+            key: mode,
+            value: mode,
+          }, tr(DEPTH_LABEL_KEYS[mode], mode)))),
         ]),
-        h('select', {
-          key: 'select',
-          className: 'whalestory-pref-select',
-          value: depth,
-          'aria-label': title,
-          onChange: (event) => setContentDepth(event.target.value),
-        }, DEPTH_MODES.map((mode) => h('option', {
-          key: mode,
-          value: mode,
-        }, typeof t === 'function' ? t(DEPTH_LABEL_KEYS[mode]) : mode))),
+        depth === 'off' ? null : h('div', {
+          key: 'warning',
+          className: 'whalestory-depth-warning',
+          role: 'note',
+        }, [
+          h('div', { key: 'title', className: 'whalestory-depth-warning-title' },
+            tr('settings.depth.warningTitle', '用量与隐私提示')),
+          h('div', { key: 'privacy' },
+            tr('settings.depth.warningPrivacy', '开启内容感知会增加旁白 LLM 的 token 用量。摘要只发送本地统计；片段会把最多约 600 字的脱敏内容发送给旁白模型提供方。')),
+          h('div', { key: 'usage', className: 'whalestory-depth-warning-usage' }, warningUsage),
+        ]),
+      ]);
+    }
+
+    function UsageRow({ t }) {
+      const { usage, failed } = useUsagePoll(true);
+      const tr = (key, fallback) => typeof t === 'function' ? t(key) : fallback;
+      const title = tr('settings.usage.title', '旁白 LLM 用量');
+      const description = tr(
+        'settings.usage.description',
+        '本次运行统计；重启 Host 后清零。只记录次数和 token，不记录提示词或内容。',
+      );
+      let counts = failed
+        ? tr('settings.usage.unavailable', '用量暂不可用')
+        : usage === null
+          ? tr('settings.usage.loading', '读取中…')
+          : `${tr('settings.usage.calls', '调用')} ${usage.totals.calls} · ${tr('settings.usage.ok', '成功')} ${usage.totals.ok} · ${tr('settings.usage.empty', '空回复')} ${usage.totals.empty} · ${tr('settings.usage.errors', '错误')} ${usage.totals.errors} · ${tr('settings.usage.limited', '限流')} ${usage.totals.limited}`;
+      const tokens = failed || usage === null
+        ? ''
+        : `${tr('settings.usage.tokensIn', '输入')} ${formatCompactCount(usage.totals.inputTokens)} / ${tr('settings.usage.tokensOut', '输出')} ${formatCompactCount(usage.totals.outputTokens)} tokens`;
+      return h('div', { className: 'whalestory-pref-block' }, [
+        h('div', { key: 'row', className: 'whalestory-pref-row whalestory-pref-row-static' }, [
+          h('div', { key: 'text', className: 'whalestory-pref-text' }, [
+            h('div', { key: 'title', className: 'whalestory-pref-title' }, title),
+            h('div', { key: 'desc', className: 'whalestory-pref-desc' }, description),
+          ]),
+        ]),
+        h('div', { key: 'stats', className: 'whalestory-usage-stats' }, [
+          h('div', { key: 'counts' }, counts),
+          tokens === '' ? null : h('div', { key: 'tokens' }, tokens),
+        ]),
       ]);
     }
 
@@ -1870,6 +1998,48 @@ window.__ModuleLoader__.load({
   outline:var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));
   outline-offset:2px;
 }
+.whalestory-pref-block{
+  border-bottom:.5px solid var(--dsw-alias-border-l2);
+  padding:16px 0;
+}
+.whalestory-pref-block .whalestory-pref-row{
+  border-bottom:none;
+  padding:0;
+}
+.whalestory-pref-row-static .whalestory-pref-text{padding-right:0}
+.whalestory-depth-warning{
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+  margin-top:10px;
+  padding:10px 12px;
+  border-left:3px solid var(--dsw-alias-state-business-primary);
+  border-radius:var(--dsw-radius-md);
+  background:var(--dsw-alias-interactive-bg-hover);
+  color:var(--dsw-alias-label-secondary);
+  font-size:12px;
+  line-height:18px;
+}
+.whalestory-depth-warning-title{
+  color:var(--dsw-alias-label-primary);
+  font-size:13px;
+  font-weight:600;
+  line-height:20px;
+}
+.whalestory-depth-warning-usage{
+  color:var(--dsw-alias-label-tertiary);
+  font-variant-numeric:tabular-nums;
+}
+.whalestory-usage-stats{
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+  margin-top:8px;
+  color:var(--dsw-alias-label-tertiary);
+  font-size:12px;
+  line-height:18px;
+  font-variant-numeric:tabular-nums;
+}
 @media (max-width:640px){
   .whalestory-stage{--ws-char-h:84px;--ws-bubble-w:190px;--ws-bubble-h:104px;height:104px}
   .whalestory-bubble-text{font-size:12px}
@@ -1921,6 +2091,12 @@ window.__ModuleLoader__.load({
           order: 45,
           locale: 'whalestory',
         }, LlmPolicyRow));
+        ctx.slots.inject('settings.general.item', () => ctx.slots.register({
+          name: 'settings.general.item',
+          id: 'llm-usage',
+          order: 46,
+          locale: 'whalestory',
+        }, UsageRow));
         ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
           name: 'conversation.input.dock',
           id: 'whalestory-companion',
@@ -1938,6 +2114,7 @@ window.__ModuleLoader__.load({
         PHRASES,
         clipLine,
         bubbleTextDensity,
+        formatCompactCount,
         hashString,
         basename,
         extractFile,
