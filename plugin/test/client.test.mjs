@@ -437,6 +437,27 @@ test('depth off skips extraction and unrelated running tools do not reuse stale 
   assert.equal(asking.contentSummary, '');
 });
 
+test('story mode requires always plus snippet', () => {
+  assert.equal(T.isStoryMode('always', 'snippet'), true);
+  assert.equal(T.isStoryMode('high', 'snippet'), false);
+  assert.equal(T.isStoryMode('always', 'summary'), false);
+  assert.equal(T.isStoryMode('always', 'off'), false);
+  assert.equal(T.isStoryMode('bogus', 'bogus'), false);
+});
+
+test('story poses are validated and override the work image while visible', () => {
+  assert.equal(T.normalizeStoryPose('attention'), 'attention');
+  assert.equal(T.normalizeStoryPose('walk'), 'walk');
+  assert.equal(T.normalizeStoryPose('dance'), 'normal');
+  assert.equal(T.normalizeStoryPose(undefined), 'normal');
+
+  assert.equal(T.performedModeOf('writing', { story: true, pose: 'attention' }, true), 'attention');
+  assert.equal(T.performedModeOf('writing', { story: true, pose: 'walk' }, true), 'walk');
+  assert.equal(T.performedModeOf('walk', { story: true, pose: 'attention' }, false), 'walk');
+  assert.equal(T.performedModeOf('walk', { story: false, pose: 'attention' }, true), 'walk');
+  assert.equal(T.performedModeOf('error', null, true), 'error');
+});
+
 test('content snippets are redacted and capped', () => {
   const clean = T.sanitizeSnippet('token sk-abcdefghijklmnop /home/alice/project');
   assert.match(clean, /\[redacted-key\]/u);

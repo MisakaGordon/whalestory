@@ -188,6 +188,22 @@ window.__ModuleLoader__.load({
       return React.useSyncExternalStore(subscribeContentDepth, getContentDepth, getContentDepth);
     }
 
+    const STORY_POSES = ['normal', 'attention', 'asking', 'writing', 'walk'];
+    const STORY_POSE_SET = new Set(STORY_POSES);
+
+    function isStoryMode(policy, depth) {
+      return normalizeLlmPolicy(policy) === 'always' && normalizeContentDepth(depth) === 'snippet';
+    }
+
+    function normalizeStoryPose(value, fallback = 'normal') {
+      return typeof value === 'string' && STORY_POSE_SET.has(value) ? value : fallback;
+    }
+
+    function performedModeOf(mode, speech, bubbleVisible) {
+      if (!bubbleVisible || speech?.story !== true) return mode;
+      return normalizeStoryPose(speech.pose);
+    }
+
     function formatCompactCount(value) {
       const number = Number(value);
       if (!Number.isFinite(number) || number <= 0) return '0';
@@ -251,6 +267,7 @@ window.__ModuleLoader__.load({
       'settings.depth.warningTitle': '用量与隐私提示',
       'settings.depth.warningPrivacy': '开启内容感知会增加旁白 LLM 的 token 用量。摘要只发送本地统计；片段会把最多约 600 字的脱敏内容发送给旁白模型提供方。',
       'settings.depth.warningUsage': '本次运行：',
+      'settings.story.hint': '当前组合启用逐句故事模式：每次旁白只讲一句，并自动选择动作/表情；需要已读取内容，token 用量更高。',
       'settings.usage.title': '旁白 LLM 用量',
       'settings.usage.description': '本次运行统计；重启 Host 后清零。只记录次数和 token，不记录提示词或内容。',
       'settings.usage.loading': '读取中…',
@@ -279,6 +296,7 @@ window.__ModuleLoader__.load({
       'settings.depth.warningTitle': 'Usage and privacy',
       'settings.depth.warningPrivacy': 'Content awareness increases narrator token usage. Summary sends local statistics only; Snippet sends up to about 600 redacted characters to the narrator model provider.',
       'settings.depth.warningUsage': 'This run: ',
+      'settings.story.hint': 'This combination enables per-line story mode: one line per narration with an automatic pose, only when loaded content exists. Token usage is higher.',
       'settings.usage.title': 'Narrator LLM usage',
       'settings.usage.description': 'This Host run only; resets on restart. Counts and tokens only, never prompts or content.',
       'settings.usage.loading': 'Loading…',
@@ -1154,6 +1172,8 @@ window.__ModuleLoader__.load({
 
     function ContentDepthRow({ t }) {
       const depth = useContentDepth();
+      const policy = useLlmPolicy();
+      const storyMode = isStoryMode(policy, depth);
       const { usage, failed } = useUsagePoll(depth !== 'off');
       const tr = (key, fallback) => typeof t === 'function' ? t(key) : fallback;
       const title = tr('settings.depth.title', '内容感知深度');
@@ -1192,6 +1212,8 @@ window.__ModuleLoader__.load({
             tr('settings.depth.warningTitle', '用量与隐私提示')),
           h('div', { key: 'privacy' },
             tr('settings.depth.warningPrivacy', '开启内容感知会增加旁白 LLM 的 token 用量。摘要只发送本地统计；片段会把最多约 600 字的脱敏内容发送给旁白模型提供方。')),
+          storyMode ? h('div', { key: 'story', className: 'whalestory-depth-warning-story' },
+            tr('settings.story.hint', '当前组合启用逐句故事模式：每次旁白只讲一句，并自动选择动作/表情；需要已读取内容，token 用量更高。')) : null,
           h('div', { key: 'usage', className: 'whalestory-depth-warning-usage' }, warningUsage),
         ]),
       ]);
@@ -1236,6 +1258,7 @@ window.__ModuleLoader__.load({
       const reduced = useReducedMotion();
       const policy = useLlmPolicy();
       const contentDepth = useContentDepth();
+      const storyMode = isStoryMode(policy, contentDepth);
       const running = useSession((snapshot) => snapshot.running === true);
       const lastAgentError = useSession((snapshot) => snapshot.lastAgentError);
       const pending = useSessionStatus((snapshot) => snapshot.get(sessionId)?.pendingInteraction !== undefined);
@@ -1331,6 +1354,7 @@ window.__ModuleLoader__.load({
       const pendingSpeechRef = React.useRef(null);
       const speechDelayTimerRef = React.useRef(0);
       const recentLinesRef = React.useRef([]);
+      const storyLinesRef = React.useRef([]);
       const lastBeatRef = React.useRef('');
       const currentBeatRef = React.useRef('');
       const mountedAtRef = React.useRef(Date.now());
@@ -1347,6 +1371,8 @@ window.__ModuleLoader__.load({
       signalRef.current = signal;
 
       const [metrics, setMetrics] = React.useState({ stageW: 0, charW: 0, bubbleW: 0 });
+      const storyVisible = bubbleVisible && speech?.story === true;
+      const displayMode = performedModeOf(modeOf(signal), speech, bubbleVisible);
 
       const showHideTimer = React.useCallback(() => {
         if (hideTimerRef.current !== 0) clearTimeout(hideTimerRef.current);
@@ -1363,6 +1389,8 @@ window.__ModuleLoader__.load({
           text: clipLine(entry.text),
           inner: entry.inner === true,
           source: entry.source ?? 'local',
+          story: entry.story === true,
+          pose: normalizeStoryPose(entry.pose),
         };
         if (normalized.text === '') return false;
         speechRef.current = normalized;
@@ -1372,6 +1400,9 @@ window.__ModuleLoader__.load({
         bubbleVisibleRef.current = true;
         lastSpokenAtRef.current = speechShownAtRef.current;
         recentLinesRef.current = [normalized.text, ...recentLinesRef.current.filter((line) => line !== normalized.text)].slice(0, 5);
+        if (normalized.story) {
+          storyLinesRef.current = [...storyLinesRef.current, normalized.text].slice(-3);
+        }
         showHideTimer();
         return true;
       }, [showHideTimer]);
@@ -1382,6 +1413,8 @@ window.__ModuleLoader__.load({
           text: clipLine(entry.text),
           inner: entry.inner === true,
           source: entry.source ?? 'local',
+          story: entry.story === true,
+          pose: normalizeStoryPose(entry.pose),
         };
         if (normalized.text === '') return false;
         if (speechRef.current?.text === normalized.text) return false;
@@ -1416,13 +1449,19 @@ window.__ModuleLoader__.load({
         [scheduleSpeech],
       );
 
-      const replaceSpeech = React.useCallback((text) => {
+      const replaceSpeech = React.useCallback((text, story = false, pose = 'normal') => {
         const normalized = clipLine(text);
         if (normalized === '') return;
         if (recentLinesRef.current.includes(normalized)) return;
         if (speechRef.current === null) return;
         scheduleSpeech(
-          { text: normalized, inner: false, source: 'llm' },
+          {
+            text: normalized,
+            inner: false,
+            source: 'llm',
+            story,
+            pose: normalizeStoryPose(pose),
+          },
           CFG.llmReplaceDelayMs,
         );
       }, [scheduleSpeech]);
@@ -1438,6 +1477,10 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (policy === 'off') llmAbortRef.current?.abort?.();
       }, [policy]);
+
+      React.useEffect(() => {
+        if (!storyMode) storyLinesRef.current = [];
+      }, [storyMode]);
 
       // Measure the stage, actor, and bubble. Re-measure when a bubble appears.
       React.useLayoutEffect(() => {
@@ -1472,7 +1515,7 @@ window.__ModuleLoader__.load({
 
       React.useLayoutEffect(() => {
         measureRef.current();
-      }, [speech?.text, modeOf(signal), reduced]);
+      }, [speech?.text, displayMode, reduced]);
 
       // Keep static positioning in React; walking writes transforms in rAF.
       React.useLayoutEffect(() => {
@@ -1480,7 +1523,7 @@ window.__ModuleLoader__.load({
         const bubble = bubbleRef.current;
         const flip = flipRef.current;
         if (actor === null) return;
-        if (signal.mode === 'walk' && !reduced) return;
+        if (displayMode === 'walk' && !reduced) return;
         const maxX = Math.max(0, metrics.stageW - metrics.charW);
         const x = maxX / 2;
         actor.style.transform = `translate3d(${x}px,0,0)`;
@@ -1493,10 +1536,10 @@ window.__ModuleLoader__.load({
           }
         }
         positionRef.current = { x, dir: positionRef.current.dir || 1 };
-      }, [signal.mode, reduced, metrics.stageW, metrics.charW, metrics.bubbleW]);
+      }, [displayMode, reduced, metrics.stageW, metrics.charW, metrics.bubbleW]);
 
       React.useEffect(() => {
-        if (signal.mode !== 'walk' || reduced) return undefined;
+        if (displayMode !== 'walk' || reduced) return undefined;
         const actor = actorRef.current;
         const bubble = bubbleRef.current;
         const flip = flipRef.current;
@@ -1534,7 +1577,7 @@ window.__ModuleLoader__.load({
         };
         raf = requestAnimationFrame(frame);
         return () => cancelAnimationFrame(raf);
-      }, [signal.mode, reduced, metrics.stageW, metrics.charW, metrics.bubbleW]);
+      }, [displayMode, reduced, metrics.stageW, metrics.charW, metrics.bubbleW]);
 
       // Preload once so the first mode switch does not flash.
       React.useEffect(() => {
@@ -1579,6 +1622,7 @@ window.__ModuleLoader__.load({
               sessionKey: hashString(String(sessionId)).toString(36),
               policy,
               contentDepth,
+              storyHistory: storyMode ? storyLinesRef.current.slice(-3) : [],
               observation: toObservation(beat, contentDepth),
             }),
             signal: controller.signal,
@@ -1602,7 +1646,8 @@ window.__ModuleLoader__.load({
           if (text === '') return;
           if (currentBeatRef.current !== beat.beatKey) return;
           if (!bubbleVisibleRef.current) return;
-          replaceSpeech(text);
+          const story = data?.story === true;
+          replaceSpeech(text, story, story ? normalizeStoryPose(data?.pose) : 'normal');
         } catch (error) {
           if (error?.name !== 'AbortError') llmBackoffUntilRef.current = Date.now() + 120000;
         } finally {
@@ -1610,7 +1655,7 @@ window.__ModuleLoader__.load({
           if (llmAbortRef.current === controller) llmAbortRef.current = null;
           llmInFlightRef.current = false;
         }
-      }, [replaceSpeech, sessionId, policy, contentDepth]);
+      }, [replaceSpeech, sessionId, policy, contentDepth, storyMode]);
 
       // One local line per narrative beat. LLM enhancement never delays it.
       React.useEffect(() => {
@@ -1658,11 +1703,10 @@ window.__ModuleLoader__.load({
         return () => clearInterval(timer);
       }, [showSpeech, requestLlm]);
 
-      const mode = modeOf(signal);
-      const walking = mode === 'walk' && !reduced;
+      const walking = displayMode === 'walk' && !reduced;
       const stageLabel = typeof t === 'function' ? t('aria.stage') : '大肥鱼伴游';
       const ariaLabel = speech === null ? stageLabel : `${stageLabel}：${speech.text}`;
-      const staticImage = STILL_IMAGES[mode] ?? 'normal';
+      const staticImage = STILL_IMAGES[displayMode] ?? 'normal';
       const frameMs = Number(CFG.frameMs ?? 220);
 
       return h('div', {
@@ -1671,8 +1715,9 @@ window.__ModuleLoader__.load({
         role: 'group',
         'aria-label': ariaLabel,
         'data-whalestory': '',
-        'data-mode': mode,
+        'data-mode': displayMode,
         'data-walking': walking ? 'true' : 'false',
+        'data-story': storyVisible ? 'true' : 'false',
         style: { '--ws-frame-ms': `${frameMs}ms` },
       }, [
         h('div', {
@@ -2026,6 +2071,10 @@ window.__ModuleLoader__.load({
   font-weight:600;
   line-height:20px;
 }
+.whalestory-depth-warning-story{
+  color:var(--dsw-alias-label-primary);
+  font-weight:500;
+}
 .whalestory-depth-warning-usage{
   color:var(--dsw-alias-label-tertiary);
   font-variant-numeric:tabular-nums;
@@ -2135,6 +2184,9 @@ window.__ModuleLoader__.load({
         normalizeContentDepth,
         getContentDepth,
         setContentDepth,
+        isStoryMode,
+        normalizeStoryPose,
+        performedModeOf,
         sanitizeSnippet,
         extractWorkContent,
         stepWalker,

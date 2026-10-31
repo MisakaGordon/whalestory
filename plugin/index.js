@@ -19,10 +19,12 @@ import {
   LLM_POLICIES,
   MAX_OBSERVATION_BYTES,
   MAX_OUTPUT_TOKENS,
+  MAX_STORY_OUTPUT_TOKENS,
   generateNarration,
   normalizeContentDepth,
   normalizeLlmPolicy,
   normalizeObservation,
+  shouldTellStory,
   shortField,
 } from './narrate.js';
 
@@ -309,6 +311,7 @@ export function apply(ctx) {
           res.end();
           return;
         }
+        const story = shouldTellStory(policy, contentDepth, observation);
         if (policy === 'off') {
           usageMeter.blocked();
           res.writeHead(403, { 'x-whalestory-error': 'POLICY_OFF' });
@@ -343,7 +346,9 @@ export function apply(ctx) {
             selection,
             observation,
             signal: controller.signal,
-            maxOutputTokens: MAX_OUTPUT_TOKENS,
+            maxOutputTokens: story ? MAX_STORY_OUTPUT_TOKENS : MAX_OUTPUT_TOKENS,
+            story,
+            storyHistory: body?.storyHistory,
             diagnostics,
           });
           if (text === null) {
@@ -360,7 +365,11 @@ export function apply(ctx) {
             'cache-control': 'no-store',
             'x-content-type-options': 'nosniff',
           });
-          res.end(JSON.stringify({ text }));
+          res.end(JSON.stringify({
+            text,
+            story,
+            ...(story ? { pose: diagnostics.pose ?? 'normal' } : {}),
+          }));
         } catch (error) {
           if (!controller.signal.aborted) {
             child.logger?.warn?.('whalestory: independent narration failed', {

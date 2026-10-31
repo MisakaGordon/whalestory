@@ -4,15 +4,23 @@ import assert from 'node:assert/strict';
 import {
   LLM_POLICIES,
   MAX_LINE_CHARS,
+  MAX_STORY_OUTPUT_TOKENS,
+  STORY_POSES,
+  STORY_SYSTEM_PROMPT,
+  fallbackStoryPose,
   generateNarration,
   normalizeContentDepth,
   normalizeLlmPolicy,
   normalizeObservation,
+  normalizeStoryPose,
   observationPrompt,
+  parseStoryLine,
   pickReasoningEffort,
   sanitizeContentSnippet,
   sanitizeLine,
+  sanitizeStoryHistory,
   shortField,
+  shouldTellStory,
 } from '../narrate.js';
 
 function fakeLlm(chunks, { efforts = [{ id: 'off' }, { id: 'low' }], capture } = {}) {
@@ -83,6 +91,99 @@ test('normalizeObservation applies content depth after redaction', () => {
   const snippet = normalizeObservation(raw, 'snippet');
   assert.match(snippet.contentSnippet, /line1/u);
   assert.equal(snippet.contentSnippet.includes('sk-abcdefghijklmnop'), false);
+});
+
+test('story mode requires always, snippet, and reliable loaded content', () => {
+  const withSummary = { mode: 'walk', contentSummary: '读取 App.tsx，3 行' };
+  const withSnippet = { mode: 'walk', contentSnippet: 'const x = 1' };
+  assert.equal(shouldTellStory('always', 'snippet', withSummary), true);
+  assert.equal(shouldTellStory('always', 'snippet', withSnippet), true);
+  assert.equal(shouldTellStory('low', 'snippet', withSummary), false);
+  assert.equal(shouldTellStory('always', 'summary', withSummary), false);
+  assert.equal(shouldTellStory('always', 'snippet', { mode: 'normal' }), false);
+});
+
+test('story poses are limited to the five artwork states', () => {
+  assert.deepEqual(STORY_POSES, ['normal', 'attention', 'asking', 'writing', 'walk']);
+  assert.equal(normalizeStoryPose('writing'), 'writing');
+  assert.equal(normalizeStoryPose('dance', 'asking'), 'asking');
+  assert.equal(normalizeStoryPose(undefined), 'normal');
+  assert.equal(fallbackStoryPose({ mode: 'error' }), 'attention');
+  assert.equal(fallbackStoryPose({ mode: 'asking' }), 'asking');
+  assert.equal(fallbackStoryPose({ mode: 'writing' }), 'writing');
+  assert.equal(fallbackStoryPose({ mode: 'walk' }), 'walk');
+  assert.equal(fallbackStoryPose({ mode: 'normal' }), 'normal');
+});
+
+test('story history is sanitized and capped at three lines', () => {
+  const history = sanitizeStoryHistory(['第一句', '  第二句  ', '', '第三句', '第四句']);
+  assert.equal(history.length, 3);
+  assert.equal(history[0], '本鱼觉得，第二句');
+  assert.equal(history[1], '本鱼觉得，第三句');
+  assert.equal(history[2], '本鱼觉得，第四句');
+  assert.deepEqual(sanitizeStoryHistory('not an array'), []);
+});
+
+test('story lines parse JSON, fenced JSON, and plain text', () => {
+  const json = parseStoryLine('{"text":"本鱼翻开这文件，先看看它在搞什么名堂。","pose":"writing"}', []);
+  assert.equal(json.pose, 'writing');
+  assert.match(json.text, /本鱼翻开/u);
+
+  const fenced = parseStoryLine('```json\n{"text":"本鱼眉头一皱。","pose":"attention"}\n```', []);
+  assert.equal(fenced.pose, 'attention');
+  assert.equal(fenced.text, '本鱼眉头一皱。');
+
+  const plain = parseStoryLine('本鱼在摸鱼。', [], 'walk');
+  assert.deepEqual(plain, { text: '本鱼在摸鱼。', pose: 'walk' });
+
+  assert.equal(parseStoryLine('{bad json', [], 'normal'), null);
+  assert.equal(parseStoryLine('{"text":"本鱼在摸鱼。","pose":"dance"}', [], 'writing').pose, 'writing');
+  assert.equal(parseStoryLine('本鱼在摸鱼。', ['本鱼在摸鱼。'], 'normal'), null);
+});
+
+test('generateNarration story mode uses JSON prompt, pose, and history', async () => {
+  const capture = {};
+  const llm = fakeLlm([
+    { type: 'text-delta', text: '{"text":"本鱼翻开这文件，先看看它在搞什么名堂。","pose":"writing"}' },
+    { type: 'usage', usage: { inputTokens: 200, outputTokens: 60 } },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ], { capture });
+  const diagnostics = {};
+  const text = await generateNarration({
+    llm,
+    selection: { provider: 'p', model: 'm' },
+    observation: { mode: 'writing', kind: 'milestone', contentSummary: '读取 App.tsx，3 行' },
+    signal: new AbortController().signal,
+    story: true,
+    storyHistory: ['上一句'],
+    maxOutputTokens: MAX_STORY_OUTPUT_TOKENS,
+    diagnostics,
+  });
+  assert.equal(text, '本鱼翻开这文件，先看看它在搞什么名堂。');
+  assert.equal(diagnostics.pose, 'writing');
+  assert.deepEqual(diagnostics.usage, { inputTokens: 200, outputTokens: 60 });
+  assert.equal(capture.options.system, STORY_SYSTEM_PROMPT);
+  assert.equal(capture.configured.maxTokens, MAX_STORY_OUTPUT_TOKENS);
+  assert.match(capture.options.messages[0].content[0].text, /最近台词/u);
+  assert.match(capture.options.messages[0].content[0].text, /上一句/u);
+});
+
+test('generateNarration story mode rejects a malformed JSON answer', async () => {
+  const llm = fakeLlm([
+    { type: 'text-delta', text: '{bad json' },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ]);
+  const diagnostics = {};
+  const text = await generateNarration({
+    llm,
+    selection: { provider: 'p', model: 'm' },
+    observation: { mode: 'walk', kind: 'milestone', contentSnippet: 'code' },
+    signal: new AbortController().signal,
+    story: true,
+    diagnostics,
+  });
+  assert.equal(text, null);
+  assert.equal(diagnostics.reason, 'STORY_PARSE');
 });
 
 test('normalizeObservation keeps only the compact allow-list', () => {
